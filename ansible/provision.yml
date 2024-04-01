@@ -1,0 +1,146 @@
+  - name: Setup network
+    hosts: all
+    become: yes
+    tasks:  
+
+    - name: Set up NAT on inetRouter
+      template: 
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      with_items:
+        - { src: "iptables_rules.ipv4", dest: "/etc/iptables_rules.ipv4", mode: "0644" }
+        - { src: "iptables_restore", dest: "/etc/network/if-pre-up.d/iptables", mode: "0755" }
+      when: (ansible_hostname == "inetRouter")
+
+    - name: set up forward packages across routers
+      sysctl:
+        name: net.ipv4.conf.all.forwarding
+        value: '1'
+        state: present
+      when: "'routers' in group_names"
+
+    - name: disable default route
+      template: 
+        src: 00-installer-config.yaml
+        dest: /etc/netplan/00-installer-config.yaml
+        owner: root
+        group: root
+        mode: 0644
+      when: (ansible_hostname != "inetRouter") 
+
+    - name: add default gateway
+      template: 
+        src: "50-vagrant_{{ansible_hostname}}.yaml"
+        dest: /etc/netplan/50-vagrant.yaml
+        owner: root
+        group: root
+        mode: 0644
+
+    - name: Apply netplan
+      command: sudo netplan apply
+      ignore_errors: true
+
+  - name: Setup knocking port
+    hosts: inetRouter
+    become: yes
+    tasks:
+
+    - name: Install knockd
+      apt:
+        name:
+          - knockd
+          - iptables-persistent
+        state: present
+        update_cache: true
+
+
+    - name: add default knockd
+      template:
+        src: knockd
+        dest: /etc/default/knockd
+        owner: root
+        group: root
+
+    - name: add service file for knockd
+      template:
+        src: knockd.service
+        dest: /etc/systemd/system/knockd.service
+        owner: root
+        group: root
+
+    - name: add conf file for knockd
+      template:
+        src: knockd.conf
+        dest: /etc/knockd.conf
+        owner: root
+        group: root
+
+    - name: enable knockd service
+      service:
+        name: knockd
+        state: started
+        enabled: true
+
+    - name: Allow established and related connections on firewall
+      iptables:
+        chain: INPUT
+        in_interface: eth1
+        ctstate: ESTABLISHED,RELATED
+        jump: ACCEPT
+      become: yes
+
+
+    - name: Drop all firewall
+      iptables:
+        chain: INPUT
+        in_interface: eth1
+        destination_port: 22
+        jump: DROP
+      become: yes
+
+  - name: Setup central Server
+    hosts: centralServer
+    become: yes
+    tasks:
+
+    - name: Install nginx
+      apt:
+        name:
+          - nginx
+        state: present
+        update_cache: true
+
+    - name: enable nginx service
+      service:
+        name: nginx
+        state: started
+        enabled: true
+
+  - name: Setup Inet Router2
+    hosts: inetRouter2
+    become: yes
+    tasks:
+    
+    - name: redirect to centralserver:80
+      iptables:
+        table: nat
+        chain: PREROUTING
+        protocol: tcp
+        destination_port: 8080
+        jump: DNAT
+        to_destination: 192.168.0.2:80
+      become: yes
+
+    - name: redirect to centralserver:80 SNAT
+      iptables:
+        table: nat
+        chain: POSTROUTING
+        protocol: tcp
+        destination_port: 80
+        jump: SNAT
+        to_source: 192.168.0.34
+        destination: 192.168.0.2
+      become: yes
